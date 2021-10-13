@@ -49,7 +49,7 @@ use juniper::{
     ScalarValue,
 };
 use tokio::task;
-use warp::{body, filters::BoxedFilter, http, hyper::body::Bytes, query, Filter};
+use warp::{body, filters::BoxedFilter, http, hyper::body::Bytes, query, Filter, Rejection};
 
 /// Make a filter for graphql queries/mutations.
 ///
@@ -106,10 +106,10 @@ use warp::{body, filters::BoxedFilter, http, hyper::body::Bytes, query, Filter};
 ///     .and(warp::post())
 ///     .and(graphql_filter);
 /// ```
-pub fn make_graphql_filter<Query, Mutation, Subscription, CtxT, S>(
+pub fn make_graphql_filter<'a, Query, Mutation, Subscription, CtxT, S, CtxF>(
     schema: juniper::RootNode<'static, Query, Mutation, Subscription, S>,
-    context_extractor: BoxedFilter<(CtxT,)>,
-) -> BoxedFilter<(http::Response<Vec<u8>>,)>
+    context_extractor: CtxF,
+) -> impl Filter<Extract = (http::Response<Vec<u8>>,), Error = Rejection> + Clone
 where
     Query: juniper::GraphQLTypeAsync<S, Context = CtxT> + Send + 'static,
     Query::TypeInfo: Send + Sync,
@@ -117,6 +117,7 @@ where
     Mutation::TypeInfo: Send + Sync,
     Subscription: juniper::GraphQLSubscriptionType<S, Context = CtxT> + Send + 'static,
     Subscription::TypeInfo: Send + Sync,
+    CtxF: Filter<Extract = (CtxT,), Error = Rejection> + Clone + Send,
     CtxT: Send + Sync + 'static,
     S: ScalarValue + Send + Sync + 'static,
 {
@@ -136,6 +137,7 @@ where
             ))
         }
     };
+
     let post_json_filter = warp::post()
         .and(context_extractor.clone())
         .and(body::json())
@@ -154,6 +156,7 @@ where
         }
         .then(|res| async { Ok::<_, warp::Rejection>(build_response(res)) })
     };
+
     let post_graphql_filter = warp::post()
         .and(context_extractor.clone())
         .and(body::bytes())
@@ -187,14 +190,13 @@ where
         .unify()
         .or(post_graphql_filter)
         .unify()
-        .boxed()
 }
 
 /// Make a synchronous filter for graphql endpoint.
 pub fn make_graphql_filter_sync<Query, Mutation, Subscription, CtxT, S>(
     schema: juniper::RootNode<'static, Query, Mutation, Subscription, S>,
     context_extractor: BoxedFilter<(CtxT,)>,
-) -> BoxedFilter<(http::Response<Vec<u8>>,)>
+) -> impl Filter<Extract = (http::Response<Vec<u8>>,), Error = Rejection> + Clone
 where
     Query: juniper::GraphQLType<S, Context = CtxT, TypeInfo = ()> + Send + Sync + 'static,
     Mutation: juniper::GraphQLType<S, Context = CtxT, TypeInfo = ()> + Send + Sync + 'static,
@@ -279,7 +281,6 @@ where
         .unify()
         .or(post_graphql_filter)
         .unify()
-        .boxed()
 }
 
 /// Error raised by `tokio_threadpool` if the thread pool has been shutdown.
@@ -328,7 +329,7 @@ fn build_response(response: Result<(Vec<u8>, bool), anyhow::Error>) -> http::Res
 pub fn graphiql_filter(
     graphql_endpoint_url: &'static str,
     subscriptions_endpoint: Option<&'static str>,
-) -> warp::filters::BoxedFilter<(http::Response<Vec<u8>>,)> {
+) -> impl Filter<Extract = (http::Response<Vec<u8>>,), Error = Rejection> + Clone {
     warp::any()
         .map(move || graphiql_response(graphql_endpoint_url, subscriptions_endpoint))
         .boxed()
@@ -351,7 +352,7 @@ fn graphiql_response(
 pub fn playground_filter(
     graphql_endpoint_url: &'static str,
     subscriptions_endpoint_url: Option<&'static str>,
-) -> warp::filters::BoxedFilter<(http::Response<Vec<u8>>,)> {
+) -> impl Filter<Extract = (http::Response<Vec<u8>>,), Error = Rejection> + Clone {
     warp::any()
         .map(move || playground_response(graphql_endpoint_url, subscriptions_endpoint_url))
         .boxed()
@@ -709,9 +710,9 @@ mod tests_http_harness {
             let state = warp::any().map(move || Database::new());
 
             let filter = path::end().and(if is_sync {
-                make_graphql_filter_sync(schema, state.boxed())
+                make_graphql_filter_sync(schema, state.boxed()).boxed()
             } else {
-                make_graphql_filter(schema, state.boxed())
+                make_graphql_filter(schema, state.boxed()).boxed()
             });
             Self {
                 filter: filter.boxed(),
